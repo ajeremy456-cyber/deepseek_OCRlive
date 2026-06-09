@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  captureScreen: (region) => ipcRenderer.invoke('capture-screen', region),
-  getDisplays: () => ipcRenderer.invoke('get-displays')
+  captureFullscreen: () => ipcRenderer.invoke('capture-fullscreen'),
+  captureRegion: (region) => ipcRenderer.invoke('capture-region', region),
+  getDisplayInfo: () => ipcRenderer.invoke('get-display-info')
 })
