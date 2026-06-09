@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com; img-src 'self' data:; connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com;">
+  <title>SCRCPY OCR 直播監控</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Tesseract.js CDN (UMD) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <!-- Vue 3 CDN -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- 頂部標題列 -->
+    <header class="header">
+      <h1><span class="app-icon">⚫</span>SCRCPY OCR 直播監控</h1>
+      <span class="status" :class="{ active: isMonitoring }">
+        {{ isMonitoring ? '● 監控中' : '○ 待機中' }}
+      </span>
+    </header>
+
+    <!-- 工具列 -->
+    <nav class="toolbar">
+      <div class="toolbar-group">
+        <button class="btn btn-primary" @click="startRangeSelect" :disabled="isSelecting">
+          <svg width="14" height="14" viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>
+          選取監控範圍
+        </button>
+        <button class="btn btn-secondary" @click="capturePreview" :disabled="!hasRegion">
+          <svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="7" cy="6.5" r="2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2 10l3-2.5L8 10l3-3L13 9" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+          預覽監視畫面
+        </button>
+        <button class="btn btn-secondary" @click="runOCR" :disabled="!hasRegion || ocrRunning">
+          <svg width="14" height="14" viewBox="0 0 14 14"><text x="0" y="11" font-size="11" fill="currentColor">A</text></svg>
+          OCR 測試
+        </button>
+        <button class="btn btn-primary" @click="toggleMonitor" :disabled="!hasRegion" :style="isMonitoring ? {background:'#d13438',borderColor:'#d13438'} : {}">
+          <svg width="14" height="14" viewBox="0 0 14 14"><polygon v-if="!isMonitoring" points="3,1 13,7 3,13" fill="currentColor"/><rect v-if="isMonitoring" x="2" y="2" width="10" height="10" rx="1" fill="currentColor"/></svg>
+          {{ isMonitoring ? '停止監控' : '開始監控' }}
+        </button>
+      </div>
+      <div class="toolbar-group">
+        <span class="info-tag">範圍: {{ regionText }}</span>
+        <span class="info-tag">擷取間隔:
+          <select v-model="interval" class="select-inline">
+            <option :value="1000">1秒</option>
+            <option :value="2000">2秒</option>
+            <option :value="3000">3秒</option>
+            <option :value="5000">5秒</option>
+          </select>
+        </span>
+      </div>
+    </nav>
+
+    <!-- 主內容區：左右兩欄 -->
+    <main class="main-content">
+      <!-- 左：選取/預覽區域 -->
+      <section class="panel panel-left">
+        <div class="panel-header">
+          <h2>{{ isSelecting ? '選取監控範圍' : '監控區域' }}</h2>
+          <button v-if="isSelecting" class="btn btn-small" @click="cancelSelect">取消</button>
+        </div>
+
+        <!-- 選取用的 overlay canvas -->
+        <div class="viewer-container" ref="viewerContainer">
+          <!-- 顯示最新截圖 -->
+          <img
+            v-if="previewImage && !isSelecting"
+            :src="previewImage"
+            class="preview-img"
+            alt="監控畫面"
+          />
+
+          <!-- 範圍選取模式 -->
+          <div v-if="isSelecting" class="select-overlay" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp">
+            <div class="select-hint">拖曳滑鼠選取直播留言區域，放開確認</div>
+            <canvas ref="selectCanvas"></canvas>
+            <div v-if="selectRect" class="select-rect" :style="selectRectStyle"></div>
+          </div>
+
+          <!-- 空狀態 -->
+          <div v-if="!previewImage && !isSelecting" class="empty-state">
+            <div class="empty-icon">
+            <svg width="40" height="40" viewBox="0 0 40 40"><rect x="6" y="4" width="28" height="32" rx="4" fill="none" stroke="#a19f9d" stroke-width="1.5"/><rect x="10" y="10" width="20" height="14" rx="2" fill="none" stroke="#a19f9d" stroke-width="1"/></svg>
+          </div>
+            <p>點擊「選取監控範圍」開始</p>
+          </div>
+        </div>
+
+        <!-- 已選範圍資訊 -->
+        <div class="region-info" v-if="hasRegion">
+          <div class="region-badge">
+            監控範圍: ({{ region.x }}, {{ region.y }}) {{ region.width }} × {{ region.height }} px
+          </div>
+        </div>
+      </section>
+
+      <!-- 右：OCR 結果 + 資訊面板 -->
+      <section class="panel panel-right">
+        <!-- OCR 結果 -->
+        <div class="panel-header">
+          <h2>OCR 辨識結果</h2>
+          <span class="info-tag" v-if="ocrResult">信心度: {{ ocrResult.confidence }}%</span>
+        </div>
+        <div class="ocr-result-box">
+          <div v-if="ocrRunning" class="loading">
+            <div class="spinner"></div>
+            <p>OCR 辨識中...</p>
+          </div>
+          <div v-else-if="ocrResult && ocrResult.text" class="ocr-text">
+            {{ ocrResult.text }}
+          </div>
+          <div v-else-if="ocrResult && !ocrResult.text" class="empty-state small">
+            <p>未偵測到文字</p>
+          </div>
+          <div v-else class="empty-state small">
+            <p>尚未執行 OCR 測試</p>
+          </div>
+        </div>
+
+        <!-- OCR 詳細 -->
+        <div class="panel-header">
+          <h2>辨識細節</h2>
+          <button class="btn btn-small" @click="clearMessages" v-if="messages.length > 0">清除全部</button>
+        </div>
+        <div class="ocr-detail-box">
+          <div v-if="ocrResult && ocrResult.words" class="words-list">
+            <div v-for="(word, idx) in ocrResult.words" :key="idx" class="word-item">
+              <span class="word-text">{{ word.text }}</span>
+              <span class="word-confidence">{{ word.confidence }}%</span>
+            </div>
+          </div>
+          <div v-else class="empty-state small">
+            <p>辨識後顯示逐字細節</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- 底部：抓取資訊 / 留言記錄 -->
+    <footer class="footer-panel">
+      <div class="panel-header">
+        <h2>抓取資訊 ({{ messages.length }})</h2>
+        <div class="footer-actions">
+          <span class="info-tag">最新擷取: {{ lastCaptureTime || '--' }}</span>
+          <button class="btn btn-small" @click="exportMessages" :disabled="messages.length === 0">匯出 CSV</button>
+        </div>
+      </div>
+      <div class="messages-container" ref="messagesContainer">
+        <div v-if="messages.length === 0" class="empty-state small">
+          <p>監控開始後，OCR 辨識結果會顯示在這裡</p>
+        </div>
+        <div v-for="(msg, idx) in messages" :key="idx" class="message-row">
+          <span class="msg-time">{{ msg.time }}</span>
+          <span class="msg-text">{{ msg.text }}</span>
+          <span class="msg-conf" v-if="msg.confidence">信心: {{ msg.confidence }}%</span>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
